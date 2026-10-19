@@ -10,7 +10,10 @@ mkdir -p "$HOME/.cache/labsign-nuget"
 docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp/home -e DOTNET_CLI_TELEMETRY_OPTOUT=1 \
   -e NUGET_PACKAGES=/nuget -v "$HOME/.cache/labsign-nuget":/nuget -v "$PWD":/src -w /src \
   labsign-test bash -euo pipefail -c '
-    mkdir -p "$HOME"
+    # Own TMPDIR: the SDK keeps named-mutex files there, and under a CI runner uid the
+    # image'"'"'s /tmp/.dotnet is not writable ("cannot open ... NuGet-Migrations").
+    mkdir -p "$HOME/tmp"
+    export TMPDIR="$HOME/tmp" DOTNET_NOLOGO=1
     export SOFTHSM2_CONF=/tmp/softhsm2.conf
     mkdir -p /tmp/softhsm-tokens
     printf "directories.tokendir = /tmp/softhsm-tokens\nobjectstore.backend = file\n" > "$SOFTHSM2_CONF"
