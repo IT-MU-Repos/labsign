@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Everything that does not need Windows: the localhost API, the path and origin guards, the
+    PKCS#11 token session and the PDF signing itself. Kept cross-platform so the test suite runs on
+    Linux (including against SoftHSM2 standing in for the SafeNet token).
+  -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>LabSign.Core</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <!-- Same versions LIMS_SOURCE signs with today (LIMS_App.vbproj). -->
+    <PackageReference Include="itext" Version="9.5.0" />
+    <PackageReference Include="itext.bouncy-castle-adapter" Version="9.5.0" />
+    <PackageReference Include="Pkcs11Interop" Version="5.3.0" />
+    <PackageReference Include="PdfPig" Version="0.1.9" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="LabSign.Tests" />
+  </ItemGroup>
+
+</Project>

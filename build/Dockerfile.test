@@ -1,0 +1,5 @@
+# .NET 8 SDK + SoftHSM2, for running the suite (including the PKCS#11 token tests) on Linux.
+FROM mcr.microsoft.com/dotnet/sdk:8.0
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends softhsm2 && rm -rf /var/lib/apt/lists/* \
+ # Pkcs11Interop 5.x dlopen()s the unversioned "libdl", which glibc >= 2.34 no longer ships.
+ && ln -sf "$(find /lib /usr/lib -name 'libdl.so.2' | head -1)" /usr/lib/libdl.so

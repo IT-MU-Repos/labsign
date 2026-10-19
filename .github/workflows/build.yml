@@ -1,0 +1,59 @@
+name: Build LabSign
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Test (incl. SoftHSM2 token)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the suite in the test image
+        run: bash build/test.sh
+
+  release:
+    name: Publish LabSign.exe
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' Directory.Build.props | head -1)"
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "${GITHUB_REF_NAME#v}" != "$version" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match <Version>$version</Version> in Directory.Build.props"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Publish (win-x64, self-contained single file)
+        run: |
+          docker run --rm -v "$PWD":/src -w /src mcr.microsoft.com/dotnet/sdk:8.0 \
+            dotnet publish src/LabSign/LabSign.csproj -c Release -o out/win-x64
+          sha256sum out/win-x64/LabSign.exe | tee out/win-x64/LabSign.exe.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LabSign-${{ steps.version.outputs.version }}
+          path: |
+            out/win-x64/LabSign.exe
+            out/win-x64/LabSign.exe.sha256
+
+      - name: Create the GitHub release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" out/win-x64/LabSign.exe out/win-x64/LabSign.exe.sha256 \
+            --title "LabSign ${{ steps.version.outputs.version }}" --generate-notes
