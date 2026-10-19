@@ -39,9 +39,11 @@ jobs:
 
       - name: Publish (win-x64, self-contained single file)
         run: |
-          docker run --rm -v "$PWD":/src -w /src mcr.microsoft.com/dotnet/sdk:8.0 \
+          # The checksum is written inside the container too: out/ is root-owned outside it.
+          docker run --rm -v "$PWD":/src -w /src mcr.microsoft.com/dotnet/sdk:8.0 bash -euo pipefail -c '
             dotnet publish src/LabSign/LabSign.csproj -c Release -o out/win-x64
-          sha256sum out/win-x64/LabSign.exe | tee out/win-x64/LabSign.exe.sha256
+            cd out/win-x64 && sha256sum LabSign.exe > LabSign.exe.sha256'
+          cat out/win-x64/LabSign.exe.sha256
 
       - uses: actions/upload-artifact@v4
         with:
