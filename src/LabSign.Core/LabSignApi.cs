@@ -10,12 +10,17 @@ using Microsoft.Extensions.Logging;
 namespace LabSign.Core;
 
 /// <summary>
-/// The loopback HTTP API the LIMS page talks to:
-/// <c>GET /health</c>, <c>POST /sign-batch</c> (NDJSON stream), <c>POST /finalize</c>.
+/// The loopback HTTP API the web apps talk to:
+/// <c>GET /health</c>; the LIMS share flow <c>POST /sign-batch</c> (NDJSON stream) and
+/// <c>POST /finalize</c>; and the Mule byte flow <c>POST /sessions</c>,
+/// <c>POST /sessions/{id}/sign</c> (PDF in, signed PDF out), <c>DELETE /sessions/{id}</c>.
 /// </summary>
 public static class LabSignApi
 {
     public const string ServiceIdentity = "labsign";
+
+    /// <summary>A report PDF is a few MB; this is generous and still bounded.</summary>
+    public const long MaxPdfBytes = 64L * 1024 * 1024;
 
     public static readonly JsonSerializerOptions Json = new()
     {
@@ -35,18 +40,70 @@ public static class LabSignApi
         var builder = WebApplication.CreateSlimBuilder();
         builder.Logging.ClearProviders();
         configureHost(builder);
-        builder.Services.AddSingleton(new BatchSigner(config, token, interaction));
+        var gate = new SigningGate();
+        var sessions = new SigningSessions(config, token, interaction, gate);
+        builder.Services.AddSingleton(new BatchSigner(config, token, interaction, gate));
+        builder.Services.AddSingleton(sessions);
 
         var app = builder.Build();
         app.Use((context, next) => Guard(context, next, config));
+
+        // A forgotten tab must not leave the token logged in.
+        var idleTimer = new Timer(_ => sessions.ExpireIdle(), null, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
+        app.Lifetime.ApplicationStopping.Register(() =>
+        {
+            idleTimer.Dispose();
+            sessions.Dispose();
+        });
 
         app.MapGet("/health", (BatchSigner signer) => Results.Json(new
         {
             service = ServiceIdentity,
             version,
             busy = signer.IsBusy,
+            session_active = sessions.IsActive,
             token = token.GetStatus(),
         }, Json));
+
+        app.MapPost("/sessions", async (HttpContext context) =>
+        {
+            var request = await ReadJson<StartSessionRequest>(context);
+            if (request is null)
+                return Results.Json(new { error = "Body must be JSON: {\"signer_name\": ..., \"document_count\": n}" }, Json, statusCode: 400);
+            var (started, failure) = await sessions.StartAsync(
+                request.SignerName, request.DocumentCount, request.Reason, context.RequestAborted);
+            return started is not null
+                ? Results.Json(started, Json)
+                : Results.Json(new { error = failure!.Error }, Json, statusCode: failure.StatusCode);
+        });
+
+        app.MapPost("/sessions/{id}/sign", async (HttpContext context, string id) =>
+        {
+            var filename = context.Request.Query["filename"].ToString();
+            if (string.IsNullOrWhiteSpace(filename)) filename = "document.pdf";
+            var pdf = await ReadBody(context, MaxPdfBytes);
+            if (pdf is null)
+                return Results.Json(new { error = $"The PDF is larger than {MaxPdfBytes / (1024 * 1024)} MB." }, Json, statusCode: 413);
+            if (pdf.Length == 0)
+                return Results.Json(new { error = "No PDF in the request body." }, Json, statusCode: 400);
+            try
+            {
+                var (signed, error) = sessions.Sign(id, pdf, filename);
+                return signed is not null
+                    ? Results.File(signed, "application/pdf", filename)
+                    : Results.Json(new { error }, Json, statusCode: 422);
+            }
+            catch (KeyNotFoundException ex)
+            {
+                return Results.Json(new { error = ex.Message }, Json, statusCode: 404);
+            }
+        });
+
+        app.MapDelete("/sessions/{id}", (string id) =>
+        {
+            sessions.End(id);
+            return Results.NoContent();
+        });
 
         app.MapPost("/sign-batch", SignBatch);
         app.MapPost("/finalize", async (HttpContext context) =>
@@ -119,7 +176,7 @@ public static class LabSignApi
 
         if (HttpMethods.IsOptions(context.Request.Method))
         {
-            context.Response.Headers.AccessControlAllowMethods = "GET, POST, OPTIONS";
+            context.Response.Headers.AccessControlAllowMethods = "GET, POST, DELETE, OPTIONS";
             context.Response.Headers.AccessControlAllowHeaders = "Content-Type";
             context.Response.Headers.AccessControlMaxAge = "600";
             if (context.Request.Headers.ContainsKey("Access-Control-Request-Private-Network"))
@@ -141,6 +198,24 @@ public static class LabSignApi
         {
             return null;
         }
+    }
+
+    /// <summary>The whole request body, or null when it is larger than <paramref name="limit"/>.</summary>
+    private static async Task<byte[]?> ReadBody(HttpContext context, long limit)
+    {
+        var sizeFeature = context.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpMaxRequestBodySizeFeature>();
+        if (sizeFeature is { IsReadOnly: false }) sizeFeature.MaxRequestBodySize = limit + 1;
+        if (context.Request.ContentLength > limit) return null;
+
+        using var buffer = new MemoryStream();
+        var chunk = new byte[81920];
+        int read;
+        while ((read = await context.Request.Body.ReadAsync(chunk, context.RequestAborted)) > 0)
+        {
+            buffer.Write(chunk, 0, read);
+            if (buffer.Length > limit) return null;
+        }
+        return buffer.ToArray();
     }
 
     private static Task WriteJson(HttpContext context, int status, object body)

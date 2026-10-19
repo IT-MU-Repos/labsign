@@ -16,6 +16,13 @@ public sealed class SignBatchRequest
     public List<ReportFile> Files { get; set; } = [];
 }
 
+public sealed class StartSessionRequest
+{
+    public string SignerName { get; set; } = "";
+    public int DocumentCount { get; set; }
+    public string? Reason { get; set; }
+}
+
 public sealed class FinalizeRequest
 {
     public List<ReportFile> Files { get; set; } = [];

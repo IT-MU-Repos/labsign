@@ -1,7 +1,7 @@
 <Project>
   <PropertyGroup>
     <!-- The one version number. /health reports it and CI tags the release v<Version>. -->
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>

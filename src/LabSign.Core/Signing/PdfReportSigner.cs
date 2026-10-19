@@ -34,26 +34,10 @@ public static class PdfReportSigner
         var partial = System.IO.Path.Combine(folder, $".{System.IO.Path.GetFileName(outputPath)}.labsign-partial");
         try
         {
-            using (var reader = new PdfReader(inputPath))
+            using (var input = File.OpenRead(inputPath))
             using (var output = new FileStream(partial, FileMode.Create, FileAccess.Write, FileShare.None))
             {
-                var signer = new PdfSigner(reader, output, new StampingProperties());
-
-                var appearance = new SignatureFieldAppearance(FieldName);
-                if (stamp.PngImage is { Length: > 0 })
-                    appearance.SetContent(ImageDataFactory.Create(stamp.PngImage));
-                else
-                    appearance.SetContent(stamp.Text);
-
-                signer.SetSignerProperties(new SignerProperties()
-                    .SetFieldName(FieldName)
-                    .SetReason(reason)
-                    .SetLocation(location)
-                    .SetPageNumber(marker.PageNumber)
-                    .SetPageRect(Placement(marker))
-                    .SetSignatureAppearance(appearance));
-
-                signer.SignDetached(signature, chain, null, null, tsa, 0, PdfSigner.CryptoStandard.CMS);
+                SignStream(input, output, marker, stamp, reason, location, signature, chain, tsa);
             }
             File.Move(partial, outputPath, overwrite: true);
         }
@@ -61,6 +45,54 @@ public static class PdfReportSigner
         {
             if (File.Exists(partial)) File.Delete(partial);
         }
+    }
+
+    /// <summary>Signs PDF bytes held in memory (the Mule flow: nothing touches the disk).</summary>
+    public static byte[] SignBytes(
+        byte[] pdf,
+        SignHereMarker marker,
+        StampContent stamp,
+        string reason,
+        string location,
+        IExternalSignature signature,
+        IX509Certificate[] chain,
+        ITSAClient? tsa)
+    {
+        using var input = new MemoryStream(pdf, writable: false);
+        using var output = new MemoryStream();
+        SignStream(input, output, marker, stamp, reason, location, signature, chain, tsa);
+        return output.ToArray();
+    }
+
+    private static void SignStream(
+        Stream input,
+        Stream output,
+        SignHereMarker marker,
+        StampContent stamp,
+        string reason,
+        string location,
+        IExternalSignature signature,
+        IX509Certificate[] chain,
+        ITSAClient? tsa)
+    {
+        using var reader = new PdfReader(input);
+        var signer = new PdfSigner(reader, output, new StampingProperties());
+
+        var appearance = new SignatureFieldAppearance(FieldName);
+        if (stamp.PngImage is { Length: > 0 })
+            appearance.SetContent(ImageDataFactory.Create(stamp.PngImage));
+        else
+            appearance.SetContent(stamp.Text);
+
+        signer.SetSignerProperties(new SignerProperties()
+            .SetFieldName(FieldName)
+            .SetReason(reason)
+            .SetLocation(location)
+            .SetPageNumber(marker.PageNumber)
+            .SetPageRect(Placement(marker))
+            .SetSignatureAppearance(appearance));
+
+        signer.SignDetached(signature, chain, null, null, tsa, 0, PdfSigner.CryptoStandard.CMS);
     }
 
     /// <summary>

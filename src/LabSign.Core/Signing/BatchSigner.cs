@@ -10,13 +10,20 @@ namespace LabSign.Core.Signing;
 /// .xlsx copied there, anything else left in Pending. The Pending originals are never deleted here;
 /// that is <see cref="Finalize"/>, called only after Django has recorded the batch.
 /// </summary>
-public sealed class BatchSigner(LabSignConfig config, ITokenProvider token, ISignerInteraction interaction)
+public sealed class BatchSigner(
+    LabSignConfig config,
+    ITokenProvider token,
+    ISignerInteraction interaction,
+    SigningGate gate)
 {
-    public const int MaxPinAttempts = 3;
+    public const int MaxPinAttempts = PinLogin.MaxAttempts;
 
-    private readonly SemaphoreSlim _oneAtATime = new(1, 1);
+    public BatchSigner(LabSignConfig config, ITokenProvider token, ISignerInteraction interaction)
+        : this(config, token, interaction, new SigningGate())
+    {
+    }
 
-    public bool IsBusy => _oneAtATime.CurrentCount == 0;
+    public bool IsBusy => gate.IsBusy;
 
     /// <summary>Validates every path before anything is touched; the first problem rejects the batch.</summary>
     public static string? Validate(SignBatchRequest request)
@@ -31,7 +38,7 @@ public sealed class BatchSigner(LabSignConfig config, ITokenProvider token, ISig
         return null;
     }
 
-    public bool TryBegin() => _oneAtATime.Wait(0);
+    public bool TryBegin() => gate.TryEnter();
 
     /// <summary>Runs a batch already admitted by <see cref="TryBegin"/>, releasing it when done.</summary>
     public async IAsyncEnumerable<BatchEvent> RunAsync(
@@ -55,28 +62,13 @@ public sealed class BatchSigner(LabSignConfig config, ITokenProvider token, ISig
                 yield return new BatchEvent { Type = "pin_required", TokenLabel = status.Label };
 
                 var pdfCount = request.Files.Count(f => IsPdf(f.Filename));
-                string? problem = null;
-                for (var attempt = 1; ; attempt++)
+                var (loggedIn, error) = await PinLogin.LoginAsync(token, interaction, status, pdfCount, cancellationToken);
+                if (loggedIn is null)
                 {
-                    var pin = await interaction.RequestPinAsync(new PinRequest(status.Label ?? "token", pdfCount, problem), cancellationToken);
-                    if (pin is null)
-                    {
-                        yield return Error("PIN entry was cancelled. Nothing was signed.");
-                        yield break;
-                    }
-                    var (loggedIn, error, canRetry) = TryLogin(pin);
-                    if (loggedIn is not null)
-                    {
-                        session = loggedIn;
-                        break;
-                    }
-                    if (!canRetry || attempt >= MaxPinAttempts)
-                    {
-                        yield return Error(error);
-                        yield break;
-                    }
-                    problem = "Wrong PIN. Too many wrong attempts lock the token.";
+                    yield return Error(error ?? "Could not log in to the token.");
+                    yield break;
                 }
+                session = loggedIn;
             }
 
             using (session)
@@ -110,24 +102,7 @@ public sealed class BatchSigner(LabSignConfig config, ITokenProvider token, ISig
         }
         finally
         {
-            _oneAtATime.Release();
-        }
-    }
-
-    /// <summary>Only a wrong PIN is worth asking again for; anything else ends the batch.</summary>
-    private (ITokenSession? Session, string Error, bool CanRetry) TryLogin(string pin)
-    {
-        try
-        {
-            return (token.Login(pin), "", false);
-        }
-        catch (TokenException ex)
-        {
-            return (null, ex.Message, ex.Kind == TokenErrorKind.WrongPin);
-        }
-        catch (Exception ex)
-        {
-            return (null, $"Could not log in to the token: {ex.Message}", false);
+            gate.Exit();
         }
     }
 

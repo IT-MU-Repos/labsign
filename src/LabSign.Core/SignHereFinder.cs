@@ -13,6 +13,17 @@ public static class SignHereFinder
     public static SignHereMarker? Find(string pdfPath)
     {
         using var document = PdfDocument.Open(pdfPath);
+        return Find(document);
+    }
+
+    public static SignHereMarker? Find(byte[] pdf)
+    {
+        using var document = PdfDocument.Open(pdf);
+        return Find(document);
+    }
+
+    private static SignHereMarker? Find(PdfDocument document)
+    {
         foreach (var page in document.GetPages())
         {
             foreach (var word in page.GetWords())

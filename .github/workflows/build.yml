@@ -17,7 +17,7 @@ jobs:
         run: bash build/test.sh
 
   release:
-    name: Publish LabSign.exe
+    name: Publish LabSign (Windows + Linux)
     needs: test
     runs-on: ubuntu-latest
     permissions:
@@ -37,25 +37,18 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - name: Publish (win-x64, self-contained single file)
-        run: |
-          # The checksum is written inside the container too: out/ is root-owned outside it.
-          docker run --rm -v "$PWD":/src -w /src mcr.microsoft.com/dotnet/sdk:8.0 bash -euo pipefail -c '
-            dotnet publish src/LabSign/LabSign.csproj -c Release -o out/win-x64
-            cd out/win-x64 && sha256sum LabSign.exe > LabSign.exe.sha256'
-          cat out/win-x64/LabSign.exe.sha256
+      - name: Publish Windows and Linux builds
+        run: bash build/package.sh
 
       - uses: actions/upload-artifact@v4
         with:
           name: LabSign-${{ steps.version.outputs.version }}
-          path: |
-            out/win-x64/LabSign.exe
-            out/win-x64/LabSign.exe.sha256
+          path: out/release/*
 
       - name: Create the GitHub release
         if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "$GITHUB_REF_NAME" out/win-x64/LabSign.exe out/win-x64/LabSign.exe.sha256 \
+          gh release create "$GITHUB_REF_NAME" out/release/* \
             --title "LabSign ${{ steps.version.outputs.version }}" --generate-notes
