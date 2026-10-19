@@ -4,3 +4,4 @@ out/
 *.user
 .vs/
 TestResults/
+.avalonia-build-tasks/
