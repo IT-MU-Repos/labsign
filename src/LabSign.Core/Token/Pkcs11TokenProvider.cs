@@ -16,9 +16,23 @@ namespace LabSign.Core.Token;
 /// </summary>
 public sealed class Pkcs11TokenProvider(string libraryPath, string? fallbackCertificatePath) : ITokenProvider, IDisposable
 {
+    static Pkcs11TokenProvider() => NativeLibraryFix.Apply();
+
     private readonly Pkcs11InteropFactories _factories = new();
     private readonly object _gate = new();
     private IPkcs11Library? _library;
+
+    private const string PlugInMessage = "No SafeNet token found. Plug in your token.";
+
+    // Removal (and some drivers' state right after a re-insert) shows up as these.
+    private static readonly HashSet<CKR> TokenGone =
+    [
+        CKR.CKR_TOKEN_NOT_PRESENT, CKR.CKR_DEVICE_REMOVED, CKR.CKR_SLOT_ID_INVALID,
+        CKR.CKR_TOKEN_NOT_RECOGNIZED, CKR.CKR_DEVICE_ERROR, CKR.CKR_GENERAL_ERROR,
+        CKR.CKR_SESSION_HANDLE_INVALID, CKR.CKR_SESSION_CLOSED,
+    ];
+
+    private int _openSessions;
 
     public TokenStatus GetStatus()
     {
@@ -26,19 +40,15 @@ public sealed class Pkcs11TokenProvider(string libraryPath, string? fallbackCert
         {
             try
             {
-                var slot = FirstSlot();
-                var label = slot.GetTokenInfo().Label.Trim();
-                using var session = slot.OpenSession(SessionType.ReadOnly);
-                // The private key is hidden until login; its public half carries the same CKA_ID.
-                var publicKey = FindKey(session, CKO.CKO_PUBLIC_KEY);
-                var keyId = publicKey is null ? null : ReadBytes(session, publicKey, CKA.CKA_ID);
-                var certificate = FindCertificate(session, keyId) ?? LoadFallbackCertificate();
-                return new TokenStatus(true, true, label, certificate?.Subject, certificate?.NotAfter.ToUniversalTime(),
-                    certificate is null ? "No certificate found on the token." : null);
+                return WithDriverRetry(ReadStatus);
             }
             catch (TokenException ex)
             {
                 return new TokenStatus(ex.Kind != TokenErrorKind.DriverMissing, false, null, null, null, ex.Message);
+            }
+            catch (Pkcs11Exception ex) when (TokenGone.Contains(ex.RV))
+            {
+                return new TokenStatus(true, false, null, null, null, PlugInMessage);
             }
             catch (Exception ex)
             {
@@ -47,12 +57,58 @@ public sealed class Pkcs11TokenProvider(string libraryPath, string? fallbackCert
         }
     }
 
+    private TokenStatus ReadStatus()
+    {
+        var slot = FirstSlot();
+        var label = slot.GetTokenInfo().Label.Trim();
+        using var session = slot.OpenSession(SessionType.ReadOnly);
+        // The private key is hidden until login; its public half carries the same CKA_ID.
+        var publicKey = FindKey(session, CKO.CKO_PUBLIC_KEY);
+        var keyId = publicKey is null ? null : ReadBytes(session, publicKey, CKA.CKA_ID);
+        var certificate = FindCertificate(session, keyId) ?? LoadFallbackCertificate();
+        return new TokenStatus(true, true, label, certificate?.Subject, certificate?.NotAfter.ToUniversalTime(),
+            certificate is null ? "No certificate found on the token." : null);
+    }
+
+    /// <summary>
+    /// Runs <paramref name="read"/>; after a PKCS#11 error, reloads the driver once and tries
+    /// again. A driver loaded while the stick was out, or holding a stale view after it was
+    /// pulled, often only sees the token again after C_Finalize / C_Initialize. Never while a
+    /// signing session is open: reloading would log it out mid-batch.
+    /// </summary>
+    private T WithDriverRetry<T>(Func<T> read)
+    {
+        try
+        {
+            return read();
+        }
+        catch (Exception ex) when (ex is Pkcs11Exception || (ex is TokenException { Kind: TokenErrorKind.NoToken }))
+        {
+            if (Volatile.Read(ref _openSessions) > 0 || _library is null) throw;
+            _library.Dispose();
+            _library = null;
+            return read();
+        }
+    }
+
     public ITokenSession Login(string pin)
     {
         lock (_gate)
         {
-            var slot = FirstSlot();
-            var label = slot.GetTokenInfo().Label.Trim();
+            ISlot slot;
+            string label;
+            try
+            {
+                (slot, label) = WithDriverRetry(() =>
+                {
+                    var first = FirstSlot();
+                    return (first, first.GetTokenInfo().Label.Trim());
+                });
+            }
+            catch (Pkcs11Exception ex) when (TokenGone.Contains(ex.RV))
+            {
+                throw new TokenException(TokenErrorKind.NoToken, PlugInMessage, ex);
+            }
             var session = slot.OpenSession(SessionType.ReadOnly);
             try
             {
@@ -80,8 +136,10 @@ public sealed class Pkcs11TokenProvider(string libraryPath, string? fallbackCert
                     ?? throw new TokenException(TokenErrorKind.NoCertificate,
                         $"No certificate on the token and none at {fallbackCertificatePath}.");
 
+                Interlocked.Increment(ref _openSessions);
                 return new Pkcs11TokenSession(session, label, certificate,
-                    new Pkcs11ExternalSignature(session, key, _factories));
+                    new Pkcs11ExternalSignature(session, key, _factories),
+                    () => Interlocked.Decrement(ref _openSessions));
             }
             catch
             {
@@ -112,7 +170,7 @@ public sealed class Pkcs11TokenProvider(string libraryPath, string? fallbackCert
         var slots = _library.GetSlotList(SlotsType.WithTokenPresent);
         return slots.Count > 0
             ? slots[0]
-            : throw new TokenException(TokenErrorKind.NoToken, "No SafeNet token found. Plug in your token.");
+            : throw new TokenException(TokenErrorKind.NoToken, PlugInMessage);
     }
 
     private IObjectHandle? FindKey(ISession session, CKO keyClass)
@@ -176,15 +234,19 @@ public sealed class Pkcs11TokenProvider(string libraryPath, string? fallbackCert
         ISession session,
         string tokenLabel,
         X509Certificate2 certificate,
-        IExternalSignature signature) : ITokenSession
+        IExternalSignature signature,
+        Action onClosed) : ITokenSession
     {
         public string TokenLabel { get; } = tokenLabel;
         public X509Certificate2 Certificate { get; } = certificate;
         public IX509Certificate[] Chain { get; } = [ToITextCertificate(certificate)];
         public IExternalSignature Signature { get; } = signature;
 
+        private int _closed;
+
         public void Dispose()
         {
+            if (Interlocked.Exchange(ref _closed, 1) == 1) return;
             try
             {
                 session.Logout();
@@ -193,7 +255,15 @@ public sealed class Pkcs11TokenProvider(string libraryPath, string? fallbackCert
             {
                 // Token pulled mid-batch, or already logged out.
             }
-            session.Dispose();
+            try
+            {
+                session.Dispose();
+            }
+            catch (Pkcs11Exception)
+            {
+                // The session went with the token.
+            }
+            onClosed();
         }
     }
 }

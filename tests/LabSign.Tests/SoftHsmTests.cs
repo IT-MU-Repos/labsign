@@ -37,6 +37,7 @@ public class SoftHsmTests
             if (_imported is not null) return _imported;
             var certificate = TestCertificate.Create("CN=SoftHSM Signatory, O=Labserve Test");
             var p = certificate.Key.ExportParameters(includePrivateParameters: true);
+            NativeLibraryFix.Apply(); // as Pkcs11TokenProvider does, before any module is loaded
             var factories = new Pkcs11InteropFactories();
             using var pkcs11 = factories.Pkcs11LibraryFactory.LoadPkcs11Library(factories, library, AppType.MultiThreaded);
             var slot = pkcs11.GetSlotList(SlotsType.WithTokenPresent).Single(s => s.GetTokenInfo().Label.Trim() == "labsign-test");

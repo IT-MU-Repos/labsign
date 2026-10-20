@@ -76,6 +76,19 @@ Requests carrying an `Origin` not in `allowed_origins` are refused before anythi
 requests whose `Host` is not a loopback name (DNS rebinding). Paths must be a
 `Reports\<Type>\Pending\<name>` / `Signed\<name>` pair.
 
+## Trying it without a SafeNet stick (Linux)
+
+`build/test-token-linux.sh` creates a SoftHSM2 software token (`labsign-test`, PIN `1234`) with a test
+certificate (`CN=LabSign Test Signatory`) and points LabSign at it. Signatures are real, from a
+certificate nobody trusts. `--unplug` / `--plug` simulate pulling the stick out and putting it back;
+`--remove` undoes it all. `build/make-test-report.py` writes a report PDF with the `SignHere!` marker.
+
+```bash
+sudo apt install softhsm2 opensc openssl
+./build/test-token-linux.sh
+python3 build/make-test-report.py test-report.pdf
+```
+
 ## Develop
 
 No SDK needed locally; everything runs in the .NET 8 SDK image:
