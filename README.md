@@ -59,6 +59,7 @@ on first run (the log is beside it):
 | `stamp_image_path` | `C:\LIMS-Data\Security\signature.png` / `~/.config/labsign/signature.png` | handwritten signature under the stamp text |
 | `tsa_url` | empty | RFC 3161 timestamp server; empty = none (as legacy) |
 | `default_reason` | `Report approved` | PDF signature reason |
+| `share_signing_enabled` | `false` | allow the old file-share flow (`/sign-batch`, `/finalize`) |
 
 ## API (loopback only)
 
@@ -71,6 +72,10 @@ on first run (the log is beside it):
   `{session_id, token_label, certificate_subject}` (Mule: byte signing, nothing on disk).
 - `POST /sessions/{id}/sign?filename=`: PDF bytes in, signed PDF bytes out (422 with `{error}` if, e.g.,
   `SignHere!` is missing). `DELETE /sessions/{id}` logs out; an idle session ends after 5 minutes.
+  Add `placement=auto&page=first|last|<n>&corner=bottom-right|bottom-left|top-right|top-left` to sign a
+  document with no `SignHere!` marker there (the marker still wins when present). Reports leave it out.
+- `/sign-batch` and `/finalize` (the old file-share flow) answer 403 unless `share_signing_enabled` is
+  `true` in the config: by default LabSign never reads or writes a lab file server.
 
 Requests carrying an `Origin` not in `allowed_origins` are refused before anything happens, as are
 requests whose `Host` is not a loopback name (DNS rebinding). Paths must be a

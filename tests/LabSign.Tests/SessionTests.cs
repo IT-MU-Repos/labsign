@@ -172,6 +172,47 @@ public sealed class SessionApiTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task The_share_flow_is_off_by_default()
+    {
+        var batch = await _client.PostAsync("/sign-batch", new StringContent(
+            """{"signer_name": "x", "files": []}""", Encoding.UTF8, "application/json"));
+        var finalize = await _client.PostAsync("/finalize", new StringContent(
+            """{"files": []}""", Encoding.UTF8, "application/json"));
+        Assert.Equal(HttpStatusCode.Forbidden, batch.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, finalize.StatusCode);
+        Assert.Contains("share_signing_enabled", await batch.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task A_document_without_the_marker_is_signed_where_asked_with_placement_auto()
+    {
+        var start = await _client.PostAsync("/sessions", new StringContent(
+            """{"signer_name": "Test Signatory", "document_count": 2}""", Encoding.UTF8, "application/json"));
+        var id = (await start.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("session_id").GetString();
+        var path = Path.Combine(Path.GetTempPath(), $"labsign-{Guid.NewGuid():N}.pdf");
+        TestPdfs.Write(path, withMarker: false);
+        var bytes = await File.ReadAllBytesAsync(path);
+        File.Delete(path);
+
+        HttpContent Pdf()
+        {
+            var content = new ByteArrayContent(bytes);
+            content.Headers.ContentType = new MediaTypeHeaderValue("application/pdf");
+            return content;
+        }
+
+        var strict = await _client.PostAsync($"/sessions/{id}/sign?filename=letter.pdf", Pdf());
+        Assert.Equal((HttpStatusCode)422, strict.StatusCode); // reports need the marker
+
+        var auto = await _client.PostAsync($"/sessions/{id}/sign?filename=letter.pdf&placement=auto&page=last&corner=bottom-left", Pdf());
+        Assert.Equal(HttpStatusCode.OK, auto.StatusCode);
+
+        var badPage = await _client.PostAsync($"/sessions/{id}/sign?filename=letter.pdf&placement=auto&page=9", Pdf());
+        Assert.Equal((HttpStatusCode)422, badPage.StatusCode);
+        Assert.Contains("page 9", await badPage.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
     public async Task Preflight_allows_delete()
     {
         var request = new HttpRequestMessage(HttpMethod.Options, "/sessions/x");
@@ -191,6 +232,47 @@ public sealed class SessionApiTests : IAsyncLifetime
         request.Headers.Add("Origin", "https://evil.example");
         var client = _app.GetTestClient();
         Assert.Equal(HttpStatusCode.Forbidden, (await client.SendAsync(request)).StatusCode);
+    }
+}
+
+public class SignaturePlacementTests
+{
+    private static byte[] Pdf(bool withMarker)
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"labsign-{Guid.NewGuid():N}.pdf");
+        TestPdfs.Write(path, withMarker);
+        var bytes = File.ReadAllBytes(path);
+        File.Delete(path);
+        return bytes;
+    }
+
+    [Fact]
+    public void The_marker_wins_even_when_a_corner_is_asked_for()
+    {
+        var (spot, _) = SignaturePlacement.Resolve(Pdf(withMarker: true), requireMarker: false, "first", "top-left", "R.pdf");
+        Assert.True(spot!.FromMarker);
+    }
+
+    [Theory]
+    [InlineData("bottom-right", 559, 36)] // A4 portrait: 595 x 842
+    [InlineData("bottom-left", 36, 36)]
+    [InlineData("top-right", 559, 806)]
+    [InlineData("top-left", 36, 806)]
+    public void Corners_sit_36pt_in_from_the_edges(string corner, float right, float top)
+    {
+        var (spot, error) = SignaturePlacement.Resolve(Pdf(withMarker: false), requireMarker: false, "last", corner, "L.pdf");
+        Assert.Null(error);
+        Assert.Equal(1, spot!.PageNumber);
+        Assert.Equal(corner.EndsWith("left") ? right : right - SignaturePlacement.Width, spot.Rect.GetX(), 0);
+        Assert.Equal(corner.StartsWith("bottom") ? top : top - SignaturePlacement.Height, spot.Rect.GetY(), 0);
+    }
+
+    [Fact]
+    public void An_unknown_corner_is_refused()
+    {
+        var (spot, error) = SignaturePlacement.Resolve(Pdf(withMarker: false), requireMarker: false, "1", "middle", "L.pdf");
+        Assert.Null(spot);
+        Assert.Contains("corner", error);
     }
 }
 

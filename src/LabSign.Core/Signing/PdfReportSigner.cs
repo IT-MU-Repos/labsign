@@ -37,7 +37,7 @@ public static class PdfReportSigner
             using (var input = File.OpenRead(inputPath))
             using (var output = new FileStream(partial, FileMode.Create, FileAccess.Write, FileShare.None))
             {
-                SignStream(input, output, marker, stamp, reason, location, signature, chain, tsa);
+                SignStream(input, output, marker.PageNumber, Placement(marker), stamp, reason, location, signature, chain, tsa);
             }
             File.Move(partial, outputPath, overwrite: true);
         }
@@ -56,18 +56,31 @@ public static class PdfReportSigner
         string location,
         IExternalSignature signature,
         IX509Certificate[] chain,
+        ITSAClient? tsa) =>
+        SignBytes(pdf, new SignatureSpot(marker.PageNumber, Placement(marker), true), stamp, reason, location, signature, chain, tsa);
+
+    /// <summary>Signs PDF bytes at a resolved <see cref="SignatureSpot"/> (marker or chosen page and corner).</summary>
+    public static byte[] SignBytes(
+        byte[] pdf,
+        SignatureSpot spot,
+        StampContent stamp,
+        string reason,
+        string location,
+        IExternalSignature signature,
+        IX509Certificate[] chain,
         ITSAClient? tsa)
     {
         using var input = new MemoryStream(pdf, writable: false);
         using var output = new MemoryStream();
-        SignStream(input, output, marker, stamp, reason, location, signature, chain, tsa);
+        SignStream(input, output, spot.PageNumber, spot.Rect, stamp, reason, location, signature, chain, tsa);
         return output.ToArray();
     }
 
     private static void SignStream(
         Stream input,
         Stream output,
-        SignHereMarker marker,
+        int pageNumber,
+        Rectangle rect,
         StampContent stamp,
         string reason,
         string location,
@@ -88,8 +101,8 @@ public static class PdfReportSigner
             .SetFieldName(FieldName)
             .SetReason(reason)
             .SetLocation(location)
-            .SetPageNumber(marker.PageNumber)
-            .SetPageRect(Placement(marker))
+            .SetPageNumber(pageNumber)
+            .SetPageRect(rect)
             .SetSignatureAppearance(appearance));
 
         signer.SignDetached(signature, chain, null, null, tsa, 0, PdfSigner.CryptoStandard.CMS);

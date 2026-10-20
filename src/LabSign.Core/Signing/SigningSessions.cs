@@ -100,7 +100,15 @@ public sealed class SigningSessions(
     /// The signed PDF, or an error a person can act on ("SignHere! not found"). Throws
     /// <see cref="KeyNotFoundException"/> for an unknown or expired session.
     /// </summary>
-    public (byte[]? Signed, string? Error) Sign(string sessionId, byte[] pdf, string filename)
+    public (byte[]? Signed, string? Error) Sign(string sessionId, byte[] pdf, string filename) =>
+        Sign(sessionId, pdf, filename, requireMarker: true, page: null, corner: null);
+
+    /// <summary>
+    /// As above; without <paramref name="requireMarker"/> a document with no SignHere! marker is
+    /// signed on <paramref name="page"/> at <paramref name="corner"/> (see <see cref="SignaturePlacement"/>).
+    /// </summary>
+    public (byte[]? Signed, string? Error) Sign(
+        string sessionId, byte[] pdf, string filename, bool requireMarker, string? page, string? corner)
     {
         ExpireIdle();
         Session session;
@@ -114,13 +122,13 @@ public sealed class SigningSessions(
 
         try
         {
-            var marker = SignHereFinder.Find(pdf);
-            if (marker is null) return (null, $"\"{SignHereFinder.Marker}\" not found in {filename}.");
+            var (spot, placementError) = SignaturePlacement.Resolve(pdf, requireMarker, page, corner, filename);
+            if (spot is null) return (null, placementError);
             var tsa = string.IsNullOrWhiteSpace(config.TsaUrl) ? null : new TSAClientBouncyCastle(config.TsaUrl);
             lock (session)
             {
                 var signed = PdfReportSigner.SignBytes(
-                    pdf, marker, session.Stamp, session.Reason, config.Location,
+                    pdf, spot, session.Stamp, session.Reason, config.Location,
                     session.Token.Signature, session.Token.Chain, tsa);
                 Log.Write($"{filename}: signed (session)");
                 lock (_lock) session.LastUsed = _now();

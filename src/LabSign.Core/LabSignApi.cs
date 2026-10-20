@@ -19,6 +19,9 @@ public static class LabSignApi
 {
     public const string ServiceIdentity = "labsign";
 
+    public const string ShareSigningOff =
+        "Signing files on a network share is switched off in this LabSign (share_signing_enabled).";
+
     /// <summary>A report PDF is a few MB; this is generous and still bounded.</summary>
     public const long MaxPdfBytes = 64L * 1024 * 1024;
 
@@ -88,7 +91,11 @@ public static class LabSignApi
                 return Results.Json(new { error = "No PDF in the request body." }, Json, statusCode: 400);
             try
             {
-                var (signed, error) = sessions.Sign(id, pdf, filename);
+                var (signed, error) = sessions.Sign(
+                    id, pdf, filename,
+                    requireMarker: !string.Equals(context.Request.Query["placement"], "auto", StringComparison.OrdinalIgnoreCase),
+                    page: context.Request.Query["page"],
+                    corner: context.Request.Query["corner"]);
                 return signed is not null
                     ? Results.File(signed, "application/pdf", filename)
                     : Results.Json(new { error }, Json, statusCode: 422);
@@ -105,9 +112,14 @@ public static class LabSignApi
             return Results.NoContent();
         });
 
-        app.MapPost("/sign-batch", SignBatch);
+        // The share flow reads and writes \\server\...\Reports\<Type>\Pending|Signed. Off unless
+        // a PC's config switches it on, so no page can reach a lab file server by default.
+        app.MapPost("/sign-batch", (HttpContext context, BatchSigner signer) =>
+            config.ShareSigningEnabled ? SignBatch(context, signer) : WriteJson(context, 403, new { error = ShareSigningOff }));
         app.MapPost("/finalize", async (HttpContext context) =>
         {
+            if (!config.ShareSigningEnabled)
+                return Results.Json(new { error = ShareSigningOff }, Json, statusCode: 403);
             var request = await ReadJson<FinalizeRequest>(context);
             return request is null
                 ? Results.Json(new { error = "Body must be JSON: {\"files\": [...]}" }, Json, statusCode: 400)

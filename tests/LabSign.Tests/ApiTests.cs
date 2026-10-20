@@ -20,7 +20,7 @@ public sealed class ApiTests : IAsyncLifetime
 
     public async Task InitializeAsync()
     {
-        _app = LabSignApi.Build(new LabSignConfig(), _token, new ScriptedInteraction("1234"), "9.9.9",
+        _app = LabSignApi.Build(new LabSignConfig { ShareSigningEnabled = true }, _token, new ScriptedInteraction("1234"), "9.9.9",
             builder => builder.WebHost.UseTestServer());
         await _app.StartAsync();
         _client = _app.GetTestClient();

@@ -58,6 +58,12 @@ public sealed class LabSignConfig
 
     public string DefaultReason { get; set; } = "Report approved";
 
+    /// <summary>
+    /// The LIMS share flow (/sign-batch, /finalize), which reads and writes report folders on a
+    /// lab file server. Off by default: report signing now goes through the file manager.
+    /// </summary>
+    public bool ShareSigningEnabled { get; set; }
+
     public string Location { get; set; } = "";
 
     /// <summary>Where SAC for Linux installs its module, most likely first.</summary>
